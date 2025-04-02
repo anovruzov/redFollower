@@ -124,3 +124,4 @@ while(1):
           decoded = cv2.imdecode(nparr,cv2.IMREAD_UNCHANGED)
           cv2.imshow('JPEG', decoded)
           cv2.waitKey(1)
+
