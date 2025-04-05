@@ -3,39 +3,29 @@
 
 import argparse
 import time
-import socket, os, struct
 import numpy as np
 import cv2
 
-parser = argparse.ArgumentParser(description='Connect to AI-deck JPEG streamer example')
-parser.add_argument("-n",  default="192.168.4.1", metavar="ip", help="AI-deck IP")
-parser.add_argument("-p", type=int, default='5000', metavar="port", help="AI-deck port")
-parser.add_argument('--save', action='store_true', help="Save streamed images")
+parser = argparse.ArgumentParser(description='Red ball tracking using Mac camera')
+parser.add_argument('--save', action='store_true', help="Save captured images")
 args = parser.parse_args()
 
-deck_port = args.p
-deck_ip = args.n
-
-print("Connecting to socket on {}:{}...".format(deck_ip, deck_port))
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect((deck_ip, deck_port))
-print("Socket connected")
-
-def rx_bytes(size):
-    data = bytearray()
-    while len(data) < size:
-        data.extend(client_socket.recv(size - len(data)))
-    return data
+# Initialize the video capture for the default camera
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Could not open the camera.")
+    exit()
 
 def detect_red_ball(image):
     # Convert image to HSV
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     # Define red color range in HSV
-    lower_red1 = np.array([0, 70, 50])
+    lower_red1 = np.array([0, 150, 150])
     upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 70, 50])
-    upper_red2 = np.array([179, 255, 255])
+    lower_red2 = np.array([170, 150, 150])
+    upper_red2 = np.array([180, 255, 255])
+
 
     # Create masks for red
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
@@ -45,49 +35,59 @@ def detect_red_ball(image):
     # Find contours
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    direction = None
+    # Get the center of the image
+    image_center = (image.shape[1] // 2, image.shape[0] // 2)
+
     for contour in contours:
         if cv2.contourArea(contour) > 500:  # adjust threshold as needed
             x, y, w, h = cv2.boundingRect(contour)
+            ball_center = (x + w // 2, y + h // 2)
             cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(image, "Red Ball", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    return image
+            # Compute the difference between the ball center and the image center
+            dx = ball_center[0] - image_center[0]
+            dy = ball_center[1] - image_center[1]
+
+            # Determine the most significant direction to move:
+            # If horizontal difference is larger, move left or right; otherwise up or down.
+            if abs(dx) > abs(dy):
+                direction = "left" if dx < 0 else "right"
+            else:
+                direction = "up" if dy < 0 else "down"
+            break
+
+    return image, direction
 
 start = time.time()
 count = 0
 
 while True:
-    packetInfoRaw = rx_bytes(4)
-    [length, routing, function] = struct.unpack('<HBB', packetInfoRaw)
-    imgHeader = rx_bytes(length - 2)
-    [magic, width, height, depth, format, size] = struct.unpack('<BHHBBI', imgHeader)
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to grab frame.")
+        break
 
-    if magic == 0xBC:
-        imgStream = bytearray()
+    count += 1
+    meanTimePerImage = (time.time() - start) / count
+    fps = 1 / meanTimePerImage
+    print("{:.2f} FPS".format(fps))
 
-        while len(imgStream) < size:
-            packetInfoRaw = rx_bytes(4)
-            [length, dst, src] = struct.unpack('<HBB', packetInfoRaw)
-            chunk = rx_bytes(length - 2)
-            imgStream.extend(chunk)
+    # Process the frame to detect the red ball and determine the direction
+    processed_frame, direction = detect_red_ball(frame)
+    if direction:
+        print("Direction:", direction)
 
-        count += 1
-        meanTimePerImage = (time.time() - start) / count
-        print("{:.2f} FPS".format(1 / meanTimePerImage))
+    cv2.imshow('Red Ball Tracking', processed_frame)
 
-        if format == 0:
-            bayer_img = np.frombuffer(imgStream, dtype=np.uint8)
-            bayer_img.shape = (244, 324)
-            color_img = cv2.cvtColor(bayer_img, cv2.COLOR_BayerBG2BGR)
-            color_img = detect_red_ball(color_img)
-            cv2.imshow('Color', color_img)
-            if args.save:
-                cv2.imwrite(f"stream_out/raw/img_{count:06d}.png", bayer_img)
-                cv2.imwrite(f"stream_out/debayer/img_{count:06d}.png", color_img)
-            cv2.waitKey(1)
-        else:
-            nparr = np.frombuffer(imgStream, np.uint8)
-            decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            decoded = detect_red_ball(decoded)
-            cv2.imshow('JPEG', decoded)
-            cv2.waitKey(1)
+    # Optionally save the frame if requested
+    if args.save:
+        cv2.imwrite(f"img_{count:06d}.png", processed_frame)
+
+    # Press 'q' to exit
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
